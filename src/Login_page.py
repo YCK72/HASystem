@@ -15,7 +15,7 @@ def auth_user(email, password):
         response = cognito.initiate_auth(
             ClientId=client_id,
             AuthFlow='USER_PASSWORD_AUTH',
-            AuthParameters={'EMAIL': email, 'PASSWORD': password}
+            AuthParameters={'USERNAME': email, 'PASSWORD': password}
         )
         return response['AuthenticationResult']
     except cognito.exceptions.NotAuthorizedException:

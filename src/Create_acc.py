@@ -10,6 +10,7 @@ cognito = boto3.client('cognito-idp', region_name=region)
 def user_acc(email, password):
     try:
         response = cognito.sign_up(
+            ClientId=client_id,
             Username=email,
             Password=password,
             UserAttributes=[
