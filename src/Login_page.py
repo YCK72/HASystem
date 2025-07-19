@@ -47,7 +47,7 @@ def login_page():
                 if auth_result:
                     st.session_state.logged_in = True
                     st.session_state.username = email
-                    st.success("Login Complete")
+                    st.session_state.page = 'dashboard'
         with col2:
             if st.button('Create Account'):
                 st.session_state.page = 'register'
@@ -78,6 +78,9 @@ def verification_page():
                 st.success("Account verification complete! You can now log in.")
                 st.session_state.pending_email = None
                 st.session_state.page = 'login'
+
+                if st.button("Go to Login Page"):
+                    st.session_state.page = 'login'
 
         if st.button("Resend Code"):
             try:
