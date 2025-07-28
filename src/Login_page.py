@@ -48,6 +48,7 @@ def login_page():
                     st.session_state.logged_in = True
                     st.session_state.username = email
                     st.session_state.page = 'dashboard'
+                    st.session_state.IdToken = auth_result['IdToken']
         with col2:
             if st.button('Create Account'):
                 st.session_state.page = 'register'
