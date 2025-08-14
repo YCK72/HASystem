@@ -1,9 +1,10 @@
-# Dashboard.py
 import streamlit as st
 import boto3
 import base64
 import json
 import mimetypes
+
+import folders
 
 user_pool_id = 'us-east-2_Hp4SSNxIw'
 client_id = '6q7gaomdohqejt5ckisjioegph'
@@ -15,13 +16,13 @@ identityClient = boto3.client('cognito-identity', region_name=region)
 s3Client = None
 
 
+
 def authorize_user():
+    """Exchange IdToken (from User Pool login) for an IdentityId (Identity Pool)."""
     try:
         response = identityClient.get_id(
             IdentityPoolId=identity_pool_id,
-            Logins={
-                f"cognito-idp.{region}.amazonaws.com/{user_pool_id}": st.session_state.IdToken
-            }
+            Logins={f"cognito-idp.{region}.amazonaws.com/{user_pool_id}": st.session_state.IdToken}
         )
         identityId = response.get('IdentityId')
         if not identityId:
@@ -42,7 +43,7 @@ def _decode_jwt_payload(id_token: str) -> dict:
         return {}
 
 
-def getBucketFolder():
+def getBucketFolder() -> str:
     payload_dict = _decode_jwt_payload(st.session_state.IdToken)
     user_sub = payload_dict.get('sub')
     if not user_sub:
@@ -60,9 +61,7 @@ def authenticate_s3():
     try:
         response = identityClient.get_credentials_for_identity(
             IdentityId=st.session_state.IdentityId,
-            Logins={
-                f"cognito-idp.{region}.amazonaws.com/{user_pool_id}": st.session_state.IdToken
-            }
+            Logins={f"cognito-idp.{region}.amazonaws.com/{user_pool_id}": st.session_state.IdToken}
         )
         credentials = response.get('Credentials')
         if not credentials:
@@ -76,44 +75,12 @@ def authenticate_s3():
             region_name=region
         )
         s3Client = session.client('s3')
+
+        folders.init_s3(s3Client, bucket_name)
+
     except Exception as e:
         st.error(f"S3 authentication failed: {e}")
 
-
-def list_user_objects(prefix: str):
-    try:
-        resp = s3Client.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
-        return [o for o in resp.get('Contents', []) if not o['Key'].endswith('/')]
-    except Exception as e:
-        st.error(f"Failed to list objects: {e}")
-        return []
-
-
-def render_file_list(objs):
-    if not objs:
-        st.info("No files found.")
-        return
-
-    for obj in objs:
-        key = obj['Key']
-        filename = key.split('/')[-1]
-
-        left, right = st.columns([6, 2])
-        with left:
-            st.write(filename)
-        with right:
-            try:
-                obj_resp = s3Client.get_object(Bucket=bucket_name, Key=key)
-                file_bytes = obj_resp['Body'].read()
-                st.download_button(
-                    label="Download",
-                    data=file_bytes,
-                    file_name=filename,
-                    mime="application/octet-stream",
-                    key=f"dl_{key}"
-                )
-            except Exception as e:
-                st.error(f"Download failed for {filename}: {e}")
 
 
 def dashboard_page():
@@ -124,9 +91,42 @@ def dashboard_page():
     st.title('Cloud Drive')
     st.write(f"You are logged in as **{st.session_state.username}**.")
 
-    folderPrefix = getBucketFolder()
+    user_root = getBucketFolder()
 
-    uploaded_file = st.file_uploader("Choose a file to upload", type=None)
+    if 'current_rel_folder' not in st.session_state:
+        st.session_state.current_rel_folder = ''
+
+    st.markdown("### 📁 Folders")
+
+    all_rel_folders = folders.list_all_folders_recursive(user_root)  # e.g., '', 'docs/', 'docs/reports/'
+
+    nav_cols = st.columns([3, 4, 3])
+    with nav_cols[0]:
+        st.caption("Current folder")
+        rel_folder = st.selectbox(
+            " ",
+            options=all_rel_folders,
+            index=all_rel_folders.index(st.session_state.current_rel_folder) if st.session_state.current_rel_folder in all_rel_folders else 0,
+            label_visibility="collapsed",
+        )
+        st.session_state.current_rel_folder = rel_folder
+
+    with nav_cols[1]:
+        st.caption("Create a new folder (nested allowed)")
+        new_folder_input = st.text_input("e.g., projects or projects/2025/aug", label_visibility="collapsed")
+
+    with nav_cols[2]:
+        st.caption(" ")
+        if st.button("Create Folder", type="primary", use_container_width=True):
+            target_prefix = f"{user_root}{st.session_state.current_rel_folder}"
+            if folders.create_folder(target_prefix, new_folder_input):
+                st.success(f"Created folder: {new_folder_input}")
+                st.rerun()
+
+    st.divider()
+
+    current_abs_prefix = f"{user_root}{st.session_state.current_rel_folder}"
+    uploaded_file = st.file_uploader("Upload a file to the current folder", type=None)
     if uploaded_file is not None:
         try:
             content_type, _ = mimetypes.guess_type(uploaded_file.name)
@@ -134,24 +134,67 @@ def dashboard_page():
             s3Client.upload_fileobj(
                 uploaded_file,
                 bucket_name,
-                folderPrefix + uploaded_file.name,
+                current_abs_prefix + uploaded_file.name,
                 ExtraArgs=extra_args
             )
-            st.success(f"File '{uploaded_file.name}' uploaded to {bucket_name}")
+            st.success(f"File '{uploaded_file.name}' uploaded to {bucket_name}/{st.session_state.current_rel_folder or ''}")
+            st.rerun()
         except Exception as e:
             st.error(f"Upload failed: {e}")
 
     st.divider()
 
-    objects = list_user_objects(folderPrefix)
-    render_file_list(objects)
+    folder_names, files = folders.list_user_items(current_abs_prefix)
+
+    if folder_names:
+        st.markdown("#### Subfolders")
+        cols = st.columns(min(len(folder_names), 4))
+        for i, name in enumerate(folder_names):
+            with cols[i % len(cols)]:
+                if st.button(f"📂 {name.rstrip('/')}", key=f"open_{name}"):
+                    st.session_state.current_rel_folder = f"{st.session_state.current_rel_folder}{name}"
+                    st.rerun()
+    else:
+        st.info("No subfolders in this folder yet.")
+
+    st.divider()
+
+    st.markdown("### Files")
+    selected_keys = folders.render_file_list(files)
+
+    st.divider()
+
+    st.markdown("### Move files")
+    if not selected_keys:
+        st.caption("Select one or more files above to enable moving.")
+
+    dest_folder = st.selectbox(
+        "Destination folder",
+        options=all_rel_folders,
+        index=all_rel_folders.index(st.session_state.current_rel_folder) if st.session_state.current_rel_folder in all_rel_folders else 0,
+        help="Choose where to move the selected files.",
+    )
+
+    move_disabled = len(selected_keys) == 0
+    if st.button("Move selected files", type="primary", disabled=move_disabled):
+        successes = 0
+        for src_key in selected_keys:
+            filename = src_key.split('/')[-1]
+            dst_key = f"{user_root}{dest_folder}{filename}"
+            if folders.change_loc(src_key, dst_key):
+                successes += 1
+        if successes:
+            st.success(f"Moved {successes} file(s) to {dest_folder or '(root)'}")
+            st.rerun()
+        else:
+            st.warning("No files were moved.")
 
     st.divider()
     if st.button("Refresh list"):
-        st.experimental_rerun()
+        st.rerun()
 
     if st.button("Logout"):
-        for k in ['logged_in', 'username', 'IdToken', 'IdentityId', 'page']:
+        for k in ['logged_in', 'username', 'IdToken', 'IdentityId', 'page', 'current_rel_folder']:
             st.session_state.pop(k, None)
         st.session_state.page = 'login'
         st.rerun()
